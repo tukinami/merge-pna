@@ -1,0 +1,20 @@
+[package]
+name = "merge-pna"
+version = "1.0.0"
+edition = "2021"
+authors = [ "tukinami seika" ]
+license = "MIT"
+readme = "README.md"
+description = "Tool to merge PNG and PNA(grayscale image for alpha-channel)."
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+png = "0.17.6"
+clap = { version = "4.0.10", features = ["derive"] }
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+codegen-units = 1
