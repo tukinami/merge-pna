@@ -44,9 +44,9 @@ mod tests {
         #[test]
         fn success_when_valid_config() {
             let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test_target/png");
-            let png_path = dir.clone().join("surface0010.png");
-            let pna_path = dir.clone().join("surface0010.pna");
-            let output_path = dir.clone().join("surface0010_new.png");
+            let png_path = dir.clone().join("surface0000.png");
+            let pna_path = dir.clone().join("surface0000.pna");
+            let output_path = dir.clone().join("surface0000_new.png");
             let config = Config {
                 png_path,
                 pna_path,

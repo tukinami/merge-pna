@@ -1,5 +1,6 @@
 #[derive(Debug)]
 pub(crate) enum ConfigError {
+    #[allow(dead_code)]
     Io(std::io::Error),
     PngIsNotExist,
     InvalidPnaPath,
@@ -7,8 +8,11 @@ pub(crate) enum ConfigError {
 
 #[derive(Debug)]
 pub(crate) enum MergeError {
+    #[allow(dead_code)]
     Io(std::io::Error),
+    #[allow(dead_code)]
     DecodingError(png::DecodingError),
+    #[allow(dead_code)]
     EncodingError(png::EncodingError),
     SizePngAndPnaAreDifferent,
     LessDataSize,

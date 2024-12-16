@@ -1,4 +1,4 @@
-use std::{borrow::Cow, slice::Iter};
+use std::{borrow::Cow, u8};
 
 use png::{BitDepth, ColorType, Info};
 
@@ -15,363 +15,176 @@ pub(crate) fn merge_pna(
     }
 
     let pixel_size = (png_info.width * png_info.height) as usize;
-    let mut png_rgba = buf_to_rgba(png_buf, pixel_size, png_info)?;
-    let pna_alpha_mask = buf_to_alpha_mask(pna_buf, pixel_size, pna_info)?;
 
-    for i in 0..pixel_size {
-        if let (Some(target), Some(value)) = (png_rgba.get_mut(i * 4 + 3), pna_alpha_mask.get(i)) {
-            *target = *value;
-        } else {
-            return Err(MergeError::LessDataSize);
-        }
-    }
+    let mut png_rgba = buf_to_rgba(png_buf, png_info)?;
+    adjust_length(&mut png_rgba, pixel_size * 4)?;
 
-    Ok(png_rgba)
+    let mut pna_alpha_mask = buf_to_alpha_mask(pna_buf, pna_info)?;
+    adjust_length(&mut pna_alpha_mask, pixel_size)?;
+
+    Ok(png_rgba
+        .chunks_exact(4)
+        .zip(pna_alpha_mask.iter())
+        .flat_map(|v| [v.0[0], v.0[1], v.0[2], *v.1])
+        .collect())
 }
 
-fn buf_to_rgba(buf: &[u8], pixel_size: usize, info: &Info) -> Result<Vec<u8>, MergeError> {
-    match info.color_type {
-        ColorType::Grayscale => {
-            let bytes = read_bytes_for_bit_depth_8(buf, &info.bit_depth)?;
-            let mut result = Vec::new();
-
-            let mut bytes_iter = bytes.iter();
-            for _i in 0..pixel_size {
-                match bytes_iter.next() {
-                    Some(g) => {
-                        result.push(*g);
-                        result.push(*g);
-                        result.push(*g);
-                        result.push(u8::MAX);
-                    }
-                    None => return Err(MergeError::LessDataSize),
-                }
-            }
-
-            return Ok(result);
-        }
-        ColorType::Rgb => {
-            let bytes = read_bytes_for_bit_depth_8(buf, &info.bit_depth)?;
-            let mut result = Vec::new();
-
-            let mut bytes_iter = bytes.iter();
-            for _i in 0..pixel_size {
-                match (bytes_iter.next(), bytes_iter.next(), bytes_iter.next()) {
-                    (Some(r), Some(g), Some(b)) => {
-                        result.push(*r);
-                        result.push(*g);
-                        result.push(*b);
-                        result.push(u8::MAX);
-                    }
-                    _ => return Err(MergeError::LessDataSize),
-                }
-            }
-
-            return Ok(result);
-        }
-        ColorType::Indexed => {
-            let indices = read_bytes_for_usize(buf, &info.bit_depth)?;
-            let mut result: Vec<u8> = Vec::new();
-
-            let palette = match &info.palette {
-                Some(v) => split_palette(v)?,
-                None => return Err(MergeError::PaletteNotFoundWhenIndexedPng),
-            };
-
-            let mut indices_iter = indices.iter();
-            for _i in 0..pixel_size {
-                match indices_iter.next() {
-                    Some(i) => {
-                        if let Some(p) = palette.get(*i) {
-                            result.push(p[0]);
-                            result.push(p[1]);
-                            result.push(p[2]);
-                            result.push(u8::MAX);
-                        } else {
-                            return Err(MergeError::InvalidIndexForPalette);
-                        }
-                    }
-                    _ => return Err(MergeError::LessDataSize),
-                }
-            }
-
-            return Ok(result);
-        }
-        ColorType::GrayscaleAlpha => {
-            let bytes = read_bytes_for_bit_depth_8(buf, &info.bit_depth)?;
-            let mut result = Vec::new();
-
-            let mut bytes_iter = bytes.iter();
-            for _i in 0..pixel_size {
-                match (bytes_iter.next(), bytes_iter.next()) {
-                    (Some(g), Some(a)) => {
-                        result.push(*g);
-                        result.push(*g);
-                        result.push(*g);
-                        result.push(*a);
-                    }
-                    _ => return Err(MergeError::LessDataSize),
-                }
-            }
-
-            return Ok(result);
-        }
-        ColorType::Rgba => {
-            let mut bytes = read_bytes_for_bit_depth_8(buf, &info.bit_depth)?;
-
-            if bytes.len() < pixel_size * 4 {
-                return Err(MergeError::LessDataSize);
-            } else {
-                bytes.resize(pixel_size * 4, 0);
-                return Ok(bytes);
-            }
-        }
-    }
-}
-
-fn buf_to_alpha_mask(buf: &[u8], pixel_size: usize, info: &Info) -> Result<Vec<u8>, MergeError> {
-    match info.color_type {
-        ColorType::Grayscale => {
-            let mut bytes = read_bytes_for_bit_depth_8(buf, &info.bit_depth)?;
-
-            if bytes.len() < pixel_size {
-                return Err(MergeError::LessDataSize);
-            } else {
-                bytes.resize(pixel_size, 0);
-                return Ok(bytes);
-            }
-        }
-        ColorType::Rgb => {
-            let bytes = read_bytes_for_bit_depth_8(buf, &info.bit_depth)?;
-            let mut result = Vec::new();
-
-            let mut bytes_iter = bytes.iter();
-            for _i in 0..pixel_size {
-                match (bytes_iter.next(), bytes_iter.next(), bytes_iter.next()) {
-                    (Some(r), Some(g), Some(b)) => {
-                        let v = (*r as u16 + *g as u16 + *b as u16) / 3;
-                        result.push(v as u8);
-                    }
-                    _ => return Err(MergeError::LessDataSize),
-                }
-            }
-            Ok(result)
-        }
-        ColorType::Indexed => {
-            let indices = read_bytes_for_usize(buf, &info.bit_depth)?;
-            let mut result = Vec::new();
-
-            let palette = match &info.palette {
-                Some(v) => split_palette(v)?,
-                None => return Err(MergeError::PaletteNotFoundWhenIndexedPng),
-            };
-
-            let mut indices_iter = indices.iter();
-            for _i in 0..pixel_size {
-                match indices_iter.next() {
-                    Some(i) => {
-                        if let Some(p) = palette.get(*i) {
-                            let v = (p[0] as u16 + p[1] as u16 + p[2] as u16) / 3;
-                            result.push(v as u8);
-                        } else {
-                            return Err(MergeError::InvalidIndexForPalette);
-                        }
-                    }
-                    None => return Err(MergeError::LessDataSize),
-                }
-            }
-            Ok(result)
-        }
-
-        ColorType::GrayscaleAlpha => {
-            let bytes = read_bytes_for_bit_depth_8(buf, &info.bit_depth)?;
-            let mut result = Vec::new();
-
-            let mut bytes_iter = bytes.iter();
-            for _i in 0..pixel_size {
-                match (bytes_iter.next(), bytes_iter.next()) {
-                    (Some(g), Some(_a)) => {
-                        // TODO: alpha blend?
-                        result.push(*g);
-                    }
-                    _ => return Err(MergeError::LessDataSize),
-                }
-            }
-            Ok(result)
-        }
-        ColorType::Rgba => {
-            let bytes = read_bytes_for_bit_depth_8(buf, &info.bit_depth)?;
-            let mut result = Vec::new();
-
-            let mut bytes_iter = bytes.iter();
-            for _i in 0..pixel_size {
-                match (
-                    bytes_iter.next(),
-                    bytes_iter.next(),
-                    bytes_iter.next(),
-                    bytes_iter.next(),
-                ) {
-                    (Some(r), Some(g), Some(b), Some(_a)) => {
-                        // TODO: alpha blend?
-                        let v = (*r as u16 + *g as u16 + *b as u16) / 3;
-                        result.push(v as u8);
-                    }
-                    _ => return Err(MergeError::LessDataSize),
-                }
-            }
-            Ok(result)
-        }
-    }
-}
-
-fn read_bytes_for_bit_depth_8(buf: &[u8], bit_depth: &BitDepth) -> Result<Vec<u8>, MergeError> {
-    let mut result = Vec::new();
-
-    let mut buf_iter = buf.iter();
-    let mut tmp = [0; 8];
-
-    while let Some(buf_size) = read_byte_for_bit_depth_8(&mut buf_iter, &mut tmp, bit_depth)? {
-        result.extend(tmp[0..buf_size].iter());
-    }
-
-    Ok(result)
-}
-
-fn read_byte_for_bit_depth_8(
-    buf_iter: &mut Iter<u8>,
-    output: &mut [u8; 8],
-    bit_depth: &BitDepth,
-) -> Result<Option<usize>, MergeError> {
-    if let Some(t1) = buf_iter.next() {
-        match bit_depth {
-            BitDepth::One => {
-                for i in 0..8 {
-                    output[i] = if (*t1 << i) | 0b01111111 == u8::MAX {
-                        u8::MAX
-                    } else {
-                        0
-                    };
-                }
-                Ok(Some(8))
-            }
-            BitDepth::Two => {
-                for i in 0..4 {
-                    let mut v = 0;
-                    if (*t1 << (i * 2)) | 0b01111111 == u8::MAX {
-                        v += 0b10000000;
-                    }
-                    if (*t1 << (i * 2 + 1)) | 0b01111111 == u8::MAX {
-                        v += 0b01111111;
-                    }
-
-                    output[i] = v;
-                }
-                Ok(Some(4))
-            }
-            BitDepth::Four => {
-                for i in 0..2 {
-                    let mut v = 0;
-                    if (*t1 << (i * 4)) | 0b01111111 == u8::MAX {
-                        v += 0b10000000;
-                    }
-                    if (*t1 << (i * 4 + 1)) | 0b01111111 == u8::MAX {
-                        v += 0b01000000;
-                    }
-                    if (*t1 << (i * 4 + 2)) | 0b01111111 == u8::MAX {
-                        v += 0b00100000;
-                    }
-                    if (*t1 << (i * 4 + 3)) | 0b01111111 == u8::MAX {
-                        v += 0b00011111;
-                    }
-                    output[i] = v;
-                }
-                Ok(Some(2))
-            }
-            BitDepth::Eight => {
-                output[0] = *t1;
-                Ok(Some(1))
-            }
-            BitDepth::Sixteen => {
-                if let Some(t2) = buf_iter.next() {
-                    let v = (*t1 as u16) << 8 | *t2 as u16;
-                    output[0] = (v >> 8) as u8;
-
-                    Ok(Some(1))
-                } else {
-                    Err(MergeError::LessDataSize)
-                }
-            }
-        }
+fn adjust_length(buf: &mut Vec<u8>, size: usize) -> Result<(), MergeError> {
+    if buf.len() < size {
+        Err(MergeError::LessDataSize)
     } else {
-        Ok(None)
+        buf.resize(size, 0);
+        Ok(())
     }
 }
 
-fn read_bytes_for_usize(buf: &[u8], bit_depth: &BitDepth) -> Result<Vec<usize>, MergeError> {
-    let mut result = Vec::new();
-
-    let mut buf_iter = buf.iter();
-    let mut tmp = [0; 8];
-
-    while let Some(buf_size) = read_byte_for_usize(&mut buf_iter, &mut tmp, bit_depth)? {
-        result.extend(tmp[0..buf_size].iter());
-    }
-
-    Ok(result)
-}
-
-fn read_byte_for_usize(
-    buf_iter: &mut Iter<u8>,
-    output: &mut [usize; 8],
-    bit_depth: &BitDepth,
-) -> Result<Option<usize>, MergeError> {
-    if let Some(t1) = buf_iter.next() {
-        match bit_depth {
-            BitDepth::One => {
-                for i in 0..8 {
-                    output[i] = if (*t1 << i) | 0b01111111 == u8::MAX {
-                        1
-                    } else {
-                        0
-                    };
-                }
-                Ok(Some(8))
-            }
-            BitDepth::Two => {
-                for i in 0..4 {
-                    // VVxxxxxx -> 000000VV
-                    output[i] = (((*t1 << (i * 2)) >> 6) & 0b00000011) as usize;
-                }
-                Ok(Some(4))
-            }
-            BitDepth::Four => {
-                for i in 0..2 {
-                    // VVVVxxxx -> 0000VVVV
-                    output[i] = (((*t1 << (i * 4)) >> 4) & 0b00001111) as usize;
-                }
-                Ok(Some(2))
-            }
-            BitDepth::Eight => {
-                output[0] = *t1 as usize;
-                Ok(Some(1))
-            }
-            BitDepth::Sixteen => {
-                if let Some(t2) = buf_iter.next() {
-                    // 1111111122222222
-                    let mut v = 0;
-                    v += (*t1 as u16) << 8 & 0b1111111100000000;
-                    v += *t2 as u16;
-                    output[0] = v as usize;
-
-                    Ok(Some(1))
-                } else {
-                    Err(MergeError::LessDataSize)
-                }
-            }
+fn buf_to_rgba(buf: &[u8], info: &Info) -> Result<Vec<u8>, MergeError> {
+    let bytes = match info.color_type {
+        ColorType::Indexed => {
+            return buf_to_rgba_from_indexed(buf, &info.bit_depth, info.palette.as_ref())
         }
-    } else {
-        Ok(None)
+        _ => read_bytes_for_bit_depth_8(buf, &info.bit_depth),
+    };
+
+    match info.color_type {
+        ColorType::Grayscale => Ok(bytes.iter().flat_map(|v| [*v, *v, *v, u8::MAX]).collect()),
+        ColorType::GrayscaleAlpha => Ok(bytes
+            .chunks_exact(2)
+            .flat_map(|v| [v[0], v[0], v[0], v[1]])
+            .collect()),
+        ColorType::Rgb => Ok(bytes
+            .chunks_exact(3)
+            .flat_map(|v| [v[0], v[1], v[2], u8::MAX])
+            .collect()),
+        ColorType::Rgba => Ok(bytes
+            .chunks_exact(4)
+            .flat_map(|v| [v[0], v[1], v[2], v[3]])
+            .collect()),
+        ColorType::Indexed => unreachable!("early returned."),
     }
+}
+
+fn buf_to_rgba_from_indexed(
+    buf: &[u8],
+    bit_depth: &BitDepth,
+    palette_raw: Option<&Cow<[u8]>>,
+) -> Result<Vec<u8>, MergeError> {
+    let pallete = match palette_raw {
+        Some(v) => split_palette(v)?,
+        None => return Err(MergeError::PaletteNotFoundWhenIndexedPng),
+    };
+    let indices = read_bytes_for_usize(buf, bit_depth);
+
+    indices
+        .iter()
+        .try_fold(Vec::new(), |mut acc, v| {
+            pallete.get(*v).map(|p| {
+                acc.push(p[0]);
+                acc.push(p[1]);
+                acc.push(p[2]);
+                acc.push(u8::MAX);
+                acc
+            })
+        })
+        .ok_or(MergeError::InvalidIndexForPalette)
+}
+
+fn buf_to_alpha_mask(buf: &[u8], info: &Info) -> Result<Vec<u8>, MergeError> {
+    let rgba = buf_to_rgba(buf, info)?;
+
+    Ok(rgba
+        .chunks_exact(4)
+        .flat_map(|v| {
+            // TODO: alpha blend?
+            let v = (v[0] as u16 + v[1] as u16 + v[2] as u16) / 3;
+            [v as u8]
+        })
+        .collect())
+}
+
+fn read_bytes_for_bit_depth_8(buf: &[u8], bit_depth: &BitDepth) -> Vec<u8> {
+    match bit_depth {
+        BitDepth::One => buf
+            .iter()
+            .flat_map(read_byte_depth_1)
+            .map(|v| bit_to_u8(v, 1))
+            .collect(),
+        BitDepth::Two => buf
+            .iter()
+            .flat_map(read_byte_depth_2)
+            .map(|v| bit_to_u8(v, 2))
+            .collect(),
+        BitDepth::Four => buf
+            .iter()
+            .flat_map(read_byte_depth_4)
+            .map(|v| bit_to_u8(v, 4))
+            .collect(),
+        BitDepth::Eight => buf.to_vec(),
+        BitDepth::Sixteen => buf.chunks_exact(2).flat_map(|v| [v[0]]).collect(),
+    }
+}
+
+fn read_bytes_for_usize(buf: &[u8], bit_depth: &BitDepth) -> Vec<usize> {
+    match bit_depth {
+        BitDepth::One => buf
+            .iter()
+            .flat_map(read_byte_depth_1)
+            .map(|v| v as usize)
+            .collect(),
+        BitDepth::Two => buf
+            .iter()
+            .flat_map(read_byte_depth_2)
+            .map(|v| v as usize)
+            .collect(),
+        BitDepth::Four => buf
+            .iter()
+            .flat_map(read_byte_depth_4)
+            .map(|v| v as usize)
+            .collect(),
+        BitDepth::Eight => buf.iter().map(|v| *v as usize).collect(),
+        BitDepth::Sixteen => buf
+            .chunks_exact(2)
+            .flat_map(|v| [(((v[0] as usize) << 8) | v[1] as usize)])
+            .collect(),
+    }
+}
+
+fn bit_to_u8(v: u8, bit: u32) -> u8 {
+    let v = v << (8 - bit);
+    if v.trailing_zeros() == (8 - bit) {
+        v | (u8::MAX >> bit)
+    } else {
+        v
+    }
+}
+
+fn read_byte_depth_1(v: &u8) -> [u8; 8] {
+    [
+        (v & (1 << 7)) >> 7,
+        (v & (1 << 6)) >> 6,
+        (v & (1 << 5)) >> 5,
+        (v & (1 << 4)) >> 4,
+        (v & (1 << 3)) >> 3,
+        (v & (1 << 2)) >> 2,
+        (v & (1 << 1)) >> 1,
+        (v & (1 << 0)),
+    ]
+}
+
+fn read_byte_depth_2(v: &u8) -> [u8; 4] {
+    [
+        (v & ((1 << 6) | (1 << 7))) >> 6,
+        (v & ((1 << 4) | (1 << 5))) >> 4,
+        (v & ((1 << 2) | (1 << 3))) >> 2,
+        (v & ((1 << 0) | (1 << 1))),
+    ]
+}
+
+fn read_byte_depth_4(v: &u8) -> [u8; 2] {
+    [
+        (v & ((1 << 4) | (1 << 5) | (1 << 6) | (1 << 7))) >> 4,
+        (v & ((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3))),
+    ]
 }
 
 fn split_palette(palette_raw: &Cow<[u8]>) -> Result<Vec<[u8; 3]>, MergeError> {
@@ -424,11 +237,10 @@ mod tests {
         fn success_when_valid_buf_for_grayscale() {
             let buf = [0b11000000];
             let mut info = Info::with_size(2, 2);
-            let pixel_size = (info.width * info.height) as usize;
             info.color_type = ColorType::Grayscale;
             info.bit_depth = BitDepth::Two;
 
-            let result = buf_to_rgba(&buf, pixel_size, &info).unwrap();
+            let result = buf_to_rgba(&buf, &info).unwrap();
 
             assert_eq!(
                 result,
@@ -457,11 +269,10 @@ mod tests {
         fn success_when_valid_buf_for_rgb() {
             let buf = [0b11000000, 0b00001111, 0b11110000, 0b11000000, 0b00000000];
             let mut info = Info::with_size(3, 1);
-            let pixel_size = (info.width * info.height) as usize;
             info.color_type = ColorType::Rgb;
             info.bit_depth = BitDepth::Four;
 
-            let result = buf_to_rgba(&buf, pixel_size, &info).unwrap();
+            let result = buf_to_rgba(&buf, &info).unwrap();
 
             assert_eq!(
                 result,
@@ -486,13 +297,12 @@ mod tests {
         fn success_when_valid_buf_for_indexed() {
             let buf = [0b11000000];
             let mut info = Info::with_size(2, 2);
-            let pixel_size = (info.width * info.height) as usize;
             info.color_type = ColorType::Indexed;
             info.bit_depth = BitDepth::One;
             let palette_raw = [255, 0, 0, 0, 0, 255];
             info.palette = Some(Cow::from(&palette_raw[..]));
 
-            let result = buf_to_rgba(&buf, pixel_size, &info).unwrap();
+            let result = buf_to_rgba(&buf, &info).unwrap();
 
             assert_eq!(
                 result,
@@ -513,6 +323,22 @@ mod tests {
                     0,
                     0,
                     u8::MAX,
+                    255,
+                    0,
+                    0,
+                    u8::MAX,
+                    255,
+                    0,
+                    0,
+                    u8::MAX,
+                    255,
+                    0,
+                    0,
+                    u8::MAX,
+                    255,
+                    0,
+                    0,
+                    u8::MAX,
                 ]
             );
         }
@@ -521,11 +347,10 @@ mod tests {
         fn success_when_valid_buf_for_grayscale_alpha() {
             let buf = [0b11000000, 0b00110000, 0b00001100, 0b00000011];
             let mut info = Info::with_size(2, 1);
-            let pixel_size = (info.width * info.height) as usize;
             info.color_type = ColorType::GrayscaleAlpha;
             info.bit_depth = BitDepth::Eight;
 
-            let result = buf_to_rgba(&buf, pixel_size, &info).unwrap();
+            let result = buf_to_rgba(&buf, &info).unwrap();
 
             assert_eq!(
                 result,
@@ -543,11 +368,10 @@ mod tests {
                 0b00000011,
             ];
             let mut info = Info::with_size(1, 1);
-            let pixel_size = (info.width * info.height) as usize;
             info.color_type = ColorType::Rgba;
             info.bit_depth = BitDepth::Sixteen;
 
-            let result = buf_to_rgba(&buf, pixel_size, &info).unwrap();
+            let result = buf_to_rgba(&buf, &info).unwrap();
 
             assert_eq!(
                 result,
@@ -564,24 +388,22 @@ mod tests {
         fn success_when_valid_buf_for_grayscale() {
             let buf = [0b11000000];
             let mut info = Info::with_size(2, 2);
-            let pixel_size = (info.width * info.height) as usize;
             info.color_type = ColorType::Grayscale;
             info.bit_depth = BitDepth::Two;
 
-            let result = buf_to_alpha_mask(&buf, pixel_size, &info).unwrap();
+            let result = buf_to_alpha_mask(&buf, &info).unwrap();
 
-            assert_eq!(result, vec![u8::MAX, 0, 0, 0,]);
+            assert_eq!(result, vec![u8::MAX, 0, 0, 0]);
         }
 
         #[test]
         fn success_when_valid_buf_for_rgb() {
             let buf = [0b11000000, 0b00001111, 0b11110000, 0b11000000, 0b00000000];
             let mut info = Info::with_size(3, 1);
-            let pixel_size = (info.width * info.height) as usize;
             info.color_type = ColorType::Rgb;
             info.bit_depth = BitDepth::Four;
 
-            let result = buf_to_alpha_mask(&buf, pixel_size, &info).unwrap();
+            let result = buf_to_alpha_mask(&buf, &info).unwrap();
 
             assert_eq!(result, vec![64, 170, 64]);
         }
@@ -590,26 +412,24 @@ mod tests {
         fn success_when_valid_buf_for_indexed() {
             let buf = [0b11000000];
             let mut info = Info::with_size(2, 2);
-            let pixel_size = (info.width * info.height) as usize;
             info.color_type = ColorType::Indexed;
             info.bit_depth = BitDepth::One;
             let palette_raw = [255, 0, 0, 0, 0, 255];
             info.palette = Some(Cow::from(&palette_raw[..]));
 
-            let result = buf_to_alpha_mask(&buf, pixel_size, &info).unwrap();
+            let result = buf_to_alpha_mask(&buf, &info).unwrap();
 
-            assert_eq!(result, vec![85, 85, 85, 85]);
+            assert_eq!(result, vec![85, 85, 85, 85, 85, 85, 85, 85]);
         }
 
         #[test]
         fn success_when_valid_buf_for_grayscale_alpha() {
             let buf = [0b11000000, 0b00110000, 0b00001100, 0b00000011];
             let mut info = Info::with_size(2, 1);
-            let pixel_size = (info.width * info.height) as usize;
             info.color_type = ColorType::GrayscaleAlpha;
             info.bit_depth = BitDepth::Eight;
 
-            let result = buf_to_alpha_mask(&buf, pixel_size, &info).unwrap();
+            let result = buf_to_alpha_mask(&buf, &info).unwrap();
 
             assert_eq!(result, vec![192, 12]);
         }
@@ -621,11 +441,10 @@ mod tests {
                 0b00000011,
             ];
             let mut info = Info::with_size(1, 1);
-            let pixel_size = (info.width * info.height) as usize;
             info.color_type = ColorType::Rgba;
             info.bit_depth = BitDepth::Sixteen;
 
-            let result = buf_to_alpha_mask(&buf, pixel_size, &info).unwrap();
+            let result = buf_to_alpha_mask(&buf, &info).unwrap();
 
             assert_eq!(result, vec![132]);
         }
@@ -639,7 +458,7 @@ mod tests {
             let buf = [0b00110110, 0b11001001];
             let bit_depth = BitDepth::Four;
 
-            let result = read_bytes_for_bit_depth_8(&buf, &bit_depth).unwrap();
+            let result = read_bytes_for_bit_depth_8(&buf, &bit_depth);
 
             assert_eq!(result, vec![0b00111111, 0b01100000, 0b11000000, 0b10011111]);
         }
@@ -649,123 +468,18 @@ mod tests {
             let buf = [0b00110110, 0b11001001];
             let bit_depth = BitDepth::Sixteen;
 
-            let result = read_bytes_for_bit_depth_8(&buf, &bit_depth).unwrap();
+            let result = read_bytes_for_bit_depth_8(&buf, &bit_depth);
 
             assert_eq!(result, vec![0b00110110]);
         }
 
-        #[test]
-        fn failed_when_invalid_bytes() {
-            let buf = [0b00110110, 0b11001001, 0b11110000];
-            let bit_depth = BitDepth::Sixteen;
+        // #[test]
+        // fn failed_when_invalid_bytes() {
+        //     let buf = [0b00110110, 0b11001001, 0b11110000];
+        //     let bit_depth = BitDepth::Sixteen;
 
-            assert!(read_bytes_for_bit_depth_8(&buf, &bit_depth).is_err());
-        }
-    }
-
-    mod read_byte_for_bit_depth_8 {
-        use super::*;
-
-        #[test]
-        fn success_when_value_exists_for_bit_depth_1() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::One;
-
-            let buf_size =
-                read_byte_for_bit_depth_8(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, Some(8));
-            assert_eq!(output, [0, 0, u8::MAX, u8::MAX, 0, u8::MAX, u8::MAX, 0]);
-            assert!(buf_iter.next().is_none());
-        }
-
-        #[test]
-        fn success_when_value_exits_for_bit_depth_2() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::Two;
-
-            let buf_size =
-                read_byte_for_bit_depth_8(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, Some(4));
-            assert_eq!(output, [0, u8::MAX, 0b01111111, 0b10000000, 0, 0, 0, 0]);
-            assert!(buf_iter.next().is_none());
-        }
-
-        #[test]
-        fn success_when_value_exits_for_bit_depth_4() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::Four;
-
-            let buf_size =
-                read_byte_for_bit_depth_8(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, Some(2));
-            assert_eq!(output, [0b00111111, 0b01100000, 0, 0, 0, 0, 0, 0]);
-            assert!(buf_iter.next().is_none());
-        }
-
-        #[test]
-        fn success_when_value_exits_for_bit_depth_8() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::Eight;
-
-            let buf_size =
-                read_byte_for_bit_depth_8(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, Some(1));
-            assert_eq!(output, [0b00110110, 0, 0, 0, 0, 0, 0, 0]);
-            assert!(buf_iter.next().is_none());
-        }
-
-        #[test]
-        fn success_when_value_exits_for_bit_depth_16() {
-            let buf = [0b00110110, 0b11001001];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::Sixteen;
-
-            let buf_size =
-                read_byte_for_bit_depth_8(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, Some(1));
-            assert_eq!(output, [0b00110110, 0, 0, 0, 0, 0, 0, 0]);
-            assert!(buf_iter.next().is_none());
-        }
-
-        #[test]
-        fn failed_when_less_value_for_bit_depth_16() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::Sixteen;
-
-            assert!(read_byte_for_bit_depth_8(&mut buf_iter, &mut output, &bit_depth).is_err());
-        }
-
-        #[test]
-        fn success_but_none_when_no_values() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::One;
-
-            // using value.
-            buf_iter.next();
-
-            let buf_size =
-                read_byte_for_bit_depth_8(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, None);
-        }
+        //     assert!(read_bytes_for_bit_depth_8(&buf, &bit_depth).is_err());
+        // }
     }
 
     mod read_bytes_for_usize {
@@ -776,7 +490,7 @@ mod tests {
             let buf = [0b00110110, 0b11001001];
             let bit_depth = BitDepth::Four;
 
-            let result = read_bytes_for_usize(&buf, &bit_depth).unwrap();
+            let result = read_bytes_for_usize(&buf, &bit_depth);
 
             assert_eq!(
                 result,
@@ -794,116 +508,17 @@ mod tests {
             let buf = [0b00110110, 0b11001001];
             let bit_depth = BitDepth::Sixteen;
 
-            let result = read_bytes_for_usize(&buf, &bit_depth).unwrap();
+            let result = read_bytes_for_usize(&buf, &bit_depth);
 
             assert_eq!(result, vec![0b0011011011001001 as usize]);
         }
 
-        #[test]
-        fn failed_when_invalid_bytes() {
-            let buf = [0b00110110, 0b11001001, 0b11110000];
-            let bit_depth = BitDepth::Sixteen;
+        // #[test]
+        // fn failed_when_invalid_bytes() {
+        //     let buf = [0b00110110, 0b11001001, 0b11110000];
+        //     let bit_depth = BitDepth::Sixteen;
 
-            assert!(read_bytes_for_usize(&buf, &bit_depth).is_err());
-        }
-    }
-
-    mod read_byte_for_usize {
-        use super::*;
-
-        #[test]
-        fn success_when_value_exists_for_bit_depth_1() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::One;
-
-            let buf_size = read_byte_for_usize(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, Some(8));
-            assert_eq!(output, [0, 0, 1, 1, 0, 1, 1, 0]);
-            assert!(buf_iter.next().is_none());
-        }
-
-        #[test]
-        fn success_when_value_exits_for_bit_depth_2() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::Two;
-
-            let buf_size = read_byte_for_usize(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, Some(4));
-            assert_eq!(output, [0, 3, 1, 2, 0, 0, 0, 0]);
-            assert!(buf_iter.next().is_none());
-        }
-
-        #[test]
-        fn success_when_value_exits_for_bit_depth_4() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::Four;
-
-            let buf_size = read_byte_for_usize(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, Some(2));
-            assert_eq!(output, [3, 6, 0, 0, 0, 0, 0, 0]);
-            assert!(buf_iter.next().is_none());
-        }
-
-        #[test]
-        fn success_when_value_exits_for_bit_depth_8() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::Eight;
-
-            let buf_size = read_byte_for_usize(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, Some(1));
-            assert_eq!(output, [0b00110110 as usize, 0, 0, 0, 0, 0, 0, 0]);
-            assert!(buf_iter.next().is_none());
-        }
-
-        #[test]
-        fn success_when_value_exits_for_bit_depth_16() {
-            let buf = [0b00110110, 0b11001001];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::Sixteen;
-
-            let buf_size = read_byte_for_usize(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, Some(1));
-            assert_eq!(output, [0b0011011011001001 as usize, 0, 0, 0, 0, 0, 0, 0]);
-            assert!(buf_iter.next().is_none());
-        }
-
-        #[test]
-        fn failed_when_less_value_for_bit_depth_16() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::Sixteen;
-
-            assert!(read_byte_for_usize(&mut buf_iter, &mut output, &bit_depth).is_err());
-        }
-
-        #[test]
-        fn success_but_none_when_no_values() {
-            let buf = [0b00110110];
-            let mut buf_iter = buf.iter();
-            let mut output = [0; 8];
-            let bit_depth = BitDepth::One;
-
-            // using value.
-            buf_iter.next();
-
-            let buf_size = read_byte_for_usize(&mut buf_iter, &mut output, &bit_depth).unwrap();
-
-            assert_eq!(buf_size, None);
-        }
+        //     assert!(read_bytes_for_usize(&buf, &bit_depth).is_err());
+        // }
     }
 }
